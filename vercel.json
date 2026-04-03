@@ -1,12 +1,16 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "index.html",
-      "use": "@vercel/static"
+  "functions": {
+    "api/vessels.js": {
+      "maxDuration": 10,
+      "memory": 256
     }
-  ],
+  },
   "routes": [
+    {
+      "src": "/api/vessels",
+      "dest": "/api/vessels.js"
+    },
     {
       "src": "/(.*)",
       "dest": "/index.html"

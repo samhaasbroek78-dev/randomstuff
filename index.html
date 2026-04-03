@@ -250,11 +250,10 @@ html,body{width:100%;height:100%;background:var(--bg);color:var(--text);
 'use strict';
 
 /* ── CONSTANTS ── */
-const API_KEY    = 'd21c20e747d0f62ba644a175a77dd0ebb20db4a0';
 const CENTER     = [26.3, 56.5];
 const BB         = [[[20.5, 48.0], [30.5, 65.0]]];
-const STALE_DIM  = 300_000;    // 5 min  — fade marker, show last-known position
-const STALE_REMOVE = 21_600_000; // 6 hr  — remove entirely
+const STALE_DIM  = 300_000;
+const STALE_REMOVE = 21_600_000;
 
 const TANKER_TYPES   = new Set([80,81,82,83,84,85,86,87,88,89]);
 const CARGO_TYPES    = new Set([70,71,72,73,74,75,76,77,78,79]);
@@ -376,13 +375,10 @@ map.on('zoomend', () => {
   document.getElementById('zoom-display').textContent = 'ZOOM ' + map.getZoom();
 });
 
-/* ── STATE (declared before use) ── */
+/* ── STATE ── */
 const ships        = new Map();
 const staticCache  = new Map();
-const pendingRemoval = new Map(); // mmsi → setTimeout id for grace-period removal
-let ws             = null;
-let noDataTimer    = null;
-let reconnects     = 0;
+const pendingRemoval = new Map();
 let msgCount       = 0;
 let renderPending  = false;
 let panelOpen      = true;
@@ -429,13 +425,13 @@ function upsertShip(data) {
     const s = ships.get(mmsi);
     if (!data.type && s.type) data.type = s.type;  // preserve confirmed type
     Object.assign(s, data);
-    s.updated = Date.now();
+    s.updated = data.fixTime || Date.now();
     s.marker.setLatLng([s.lat, s.lon]);
     s.marker.setIcon(makeIcon(s));  // always refresh — reverts ghost to active
   } else {
     const marker = L.marker([data.lat, data.lon], { icon: makeIcon(data) }).addTo(map);
     marker.on('click', () => showDetail(mmsi));
-    ships.set(mmsi, { ...data, marker, updated: Date.now() });
+    ships.set(mmsi, { ...data, marker, updated: data.fixTime || Date.now() });
   }
   scheduleRender();
 }
@@ -619,150 +615,130 @@ setInterval(() => {
   scheduleRender();
 }, 60_000);
 
-/* ── WEBSOCKET ── */
-function connect() {
-  setStatus('connecting', 'CONNECTING...');
-  clearTimeout(noDataTimer);
-  if (ws) { try { ws.close(); } catch (_) {} ws = null; }
-
-  ws = new WebSocket('wss://stream.aisstream.io/v0/stream');
-
-  ws.onopen = () => {
-    reconnects = 0;
-    setStatus('connected', 'CONNECTED · LIVE');
-    // Warn if no data received within 20 seconds
-    noDataTimer = setTimeout(() => {
-      setStatus('error', 'CONNECTED — NO DATA · CHECK API KEY');
-    }, 20_000);
-    ws.send(JSON.stringify({
-      APIKey: API_KEY,
-      BoundingBoxes: BB,
-      // No FilterMessageTypes — receive ALL AIS message types from AISStream.
-      // Filtering server-side can silently drop vessels whose static data
-      // isn't in AISStream's cache at that moment.
-    }));
+/* ── STATIC CACHE MERGE ── */
+// Consolidates fields from any static data message (type 5, 24) into the
+// cache and updates any live marker already on the map.
+function mergeStaticCache(mmsi, fields) {
+  const prev = staticCache.get(mmsi) || {};
+  const next  = {
+    type:     fields.type     || prev.type     || 0,
+    name:     fields.name     || prev.name     || '',
+    dest:     fields.dest     !== undefined ? (fields.dest || prev.dest || '') : (prev.dest || ''),
+    callsign: fields.callsign || prev.callsign || '',
+    imo:      fields.imo      || prev.imo      || 0,
   };
+  staticCache.set(mmsi, next);
 
-  ws.onmessage = e => {
-    try {
-      const msg = JSON.parse(e.data);
+  if (!ships.has(mmsi)) return;
+  const s = ships.get(mmsi);
+  if (next.type)     s.type     = next.type;
+  if (next.name)     s.name     = next.name;
+  if (next.dest)     s.dest     = next.dest;
+  if (next.callsign) s.callsign = next.callsign;
+  if (next.imo)      s.imo      = next.imo;
 
-      // AISStream sends JSON error objects for auth failures / rate limits
-      if (msg.error || msg.Error) {
-        const err = msg.error || msg.Error;
-        setStatus('error', ('API ERR: ' + String(err)).substring(0, 50));
-        console.error('[AIS] API error:', err);
-        return;
-      }
+  if (next.type > 0 && !isKnown(next.type)) {
+    if (!pendingRemoval.has(mmsi)) {
+      pendingRemoval.set(mmsi, setTimeout(() => {
+        if (ships.has(mmsi)) { ships.get(mmsi).marker.remove(); ships.delete(mmsi); }
+        pendingRemoval.delete(mmsi);
+        scheduleRender();
+      }, 30_000));
+    }
+  } else {
+    s.marker.setIcon(makeIcon(s));
+  }
+  scheduleRender();
+}
 
-      const meta = msg.MetaData || {};
-      const mmsi = parseInt(meta.MMSI || meta.MMSI_String || 0);
+/* ── POLL ENGINE ──
+   Calls /api/vessels (Vercel serverless function) every 30 seconds.
+   The function opens the AISStream WebSocket server-side (no CORS issues),
+   collects 8 seconds of AIS data, and returns a JSON vessel array.    */
+
+const POLL_MS = 30_000;  // refresh every 30 seconds
+let pollTimer  = null;
+let reconnects = 0;
+
+async function fetchVessels() {
+  setStatus('connecting', 'REFRESHING...');
+
+  try {
+    const res = await fetch('/api/vessels', {
+      headers: { 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(12_000),   // abort if server takes > 12s
+    });
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const msg  = body.error || `HTTP ${res.status}`;
+      setStatus('error', msg.substring(0, 50));
+      scheduleRetry();
+      return;
+    }
+
+    const data    = await res.json();
+    const vessels = Array.isArray(data.vessels) ? data.vessels : [];
+
+    msgCount += vessels.length;
+    updateFix(vessels.length);
+    setStatus('connected', `LIVE · ${vessels.length} VESSELS`);
+    reconnects = 0;
+
+    vessels.forEach(v => {
+      const mmsi = parseInt(v.mmsi || 0);
       if (!mmsi) return;
 
-      msgCount++;
-      if (msgCount === 1) { clearTimeout(noDataTimer); updateFix(); }
-      else if (msgCount % 5 === 0) updateFix();
-
-      /* ── Static data (AIS type 5 / 24) ── */
-      if (msg.MessageType === 'ShipStaticData') {
-        const sd       = msg.Message?.ShipStaticData || {};
-        const type     = parseInt(sd.Type || sd.ShipType || meta.ShipType || 0) || 0;
-        const name     = (sd.Name || sd.ShipName || meta.ShipName || '').trim();
-        const dest     = (sd.Destination || '').trim();
-        const callsign = (sd.CallSign || sd.Callsign || '').trim();
-        const imo      = parseInt(sd.ImoNumber || sd.IMO || 0) || 0;
-        const prev     = staticCache.get(mmsi) || {};
-
-        staticCache.set(mmsi, {
-          type:     type     || prev.type     || 0,
-          name:     name     || prev.name     || '',
-          dest:     dest     || prev.dest     || '',
-          callsign: callsign || prev.callsign || '',
-          imo:      imo      || prev.imo      || 0,
+      // Merge static data into cache for detail panel
+      if (v.name || v.imo || v.dest) {
+        mergeStaticCache(mmsi, {
+          type: v.type || 0, name: v.name || '', dest: v.dest || '',
+          callsign: v.callsign || '', imo: v.imo || 0,
         });
-
-        if (ships.has(mmsi)) {
-          const s = ships.get(mmsi);
-          if (type)     s.type     = type;
-          if (name)     s.name     = name;
-          if (dest)     s.dest     = dest;
-          if (callsign) s.callsign = callsign;
-          if (imo)      s.imo      = imo;
-
-          if (type > 0 && !isKnown(type)) {
-            // Non-commercial confirmed — schedule removal after 30s grace
-            if (!pendingRemoval.has(mmsi)) {
-              pendingRemoval.set(mmsi, setTimeout(() => {
-                if (ships.has(mmsi)) { ships.get(mmsi).marker.remove(); ships.delete(mmsi); }
-                pendingRemoval.delete(mmsi);
-                scheduleRender();
-              }, 30_000));
-            }
-          } else {
-            s.marker.setIcon(makeIcon(s));
-          }
-          scheduleRender();
-        }
-        return;
       }
-
-      /* ── Position-bearing messages ──
-         Class A: PositionReport (AIS 1/2/3)
-         Class B: StandardClassBCSPositionReport (AIS 18)
-         Class B ext: ExtendedClassBEquipmentPositionReport (AIS 19) */
-      const prBody =
-        msg.Message?.PositionReport ||
-        msg.Message?.StandardClassBCSPositionReport ||
-        msg.Message?.ExtendedClassBEquipmentPositionReport;
-
-      if (!prBody) return;
-
-      // AISStream MetaData lat/lon are pre-parsed decimal degrees — use first
-      let lat = parseFloat(meta.latitude);
-      let lon = parseFloat(meta.longitude);
-      // Fallback to raw message fields
-      if (!isFinite(lat) || !isFinite(lon)) {
-        lat = parseFloat(prBody.Latitude ?? prBody.Lat ?? 91);
-        lon = parseFloat(prBody.Longitude ?? prBody.Lon ?? 181);
-      }
-
-      // Reject AIS "not available" sentinels (91 / 181) and null-island
-      if (!isFinite(lat) || !isFinite(lon)) return;
-      if (lat === 0 && lon === 0) return;
-      if (Math.abs(lat) >= 91 || Math.abs(lon) >= 181) return;
-
-      const cached  = staticCache.get(mmsi) || {};
-      // Only use meta.ShipType if it's non-zero (0 means AISStream hasn't resolved it)
-      const rawType = (meta.ShipType > 0) ? meta.ShipType
-                    : (prBody.ShipType > 0) ? prBody.ShipType
-                    : null;
-      const type    = (rawType !== null ? parseInt(rawType) : 0) || cached.type || 0;
-      const name    = (meta.ShipName || '').trim() || cached.name || '';
-      const sog     = parseFloat(prBody.Sog ?? prBody.SOG ?? prBody.SpeedOverGround ?? 0) || 0;
-      const cog     = parseFloat(prBody.Cog ?? prBody.COG ?? prBody.CourseOverGround ?? 0) || 0;
-      const hdg     = parseInt(prBody.TrueHeading ?? prBody.Heading ?? 511);
-      const status  = parseInt(prBody.NavigationalStatus ?? prBody.Status ?? 15);
 
       upsertShip({
-        mmsi, lat, lon, sog, cog, hdg, status, type, name,
-        dest:     cached.dest     || '',
-        callsign: cached.callsign || '',
-        imo:      cached.imo      || 0,
+        mmsi,
+        lat:      v.lat,      lon:      v.lon,
+        sog:      v.sog,      cog:      v.cog,
+        hdg:      v.hdg,      status:   v.status,
+        type:     v.type,     name:     v.name     || '',
+        dest:     v.dest     || '',
+        callsign: v.callsign || '',
+        imo:      v.imo      || 0,
+        fixTime:  v.fixTime  || Date.now(),
       });
-    } catch (err) {
-      console.warn('[AIS] Parse error:', err.message, e.data?.substring(0, 80));
-    }
-  };
+    });
 
-  ws.onerror = () => setStatus('error', 'WEBSOCKET ERROR');
+    scheduleRender();
 
-  ws.onclose = ev => {
-    const delay = Math.min(3000 * Math.pow(1.5, reconnects), 30000);
-    setStatus('error', `DISCONNECTED · RETRY ${Math.round(delay / 1000)}s`);
-    console.warn(`[AIS] Closed (${ev.code}). Retrying in ${Math.round(delay / 1000)}s`);
-    reconnects++;
-    setTimeout(connect, delay);
-  };
+  } catch (err) {
+    const msg = err.name === 'TimeoutError' ? 'REQUEST TIMEOUT' : 'NETWORK ERROR';
+    console.warn('[AIS proxy]', err.message);
+    setStatus('error', msg + ' · RETRYING');
+    scheduleRetry();
+  }
+}
+
+function scheduleRetry() {
+  clearTimeout(pollTimer);
+  const delay = Math.min(5_000 * Math.pow(1.5, reconnects), 60_000);
+  reconnects++;
+  pollTimer = setTimeout(startPolling, delay);
+}
+
+function startPolling() {
+  clearTimeout(pollTimer);
+  fetchVessels();
+  pollTimer = setInterval(fetchVessels, POLL_MS);
+}
+
+function updateFix(count) {
+  const n = new Date();
+  const pad = v => String(v).padStart(2, '0');
+  document.getElementById('last-fix').textContent =
+    `FIX ${pad(n.getUTCHours())}:${pad(n.getUTCMinutes())}:${pad(n.getUTCSeconds())} UTC`;
+  document.getElementById('msg-count').textContent = count + ' VESSELS';
 }
 
 /* ── KEYBOARD ── */
@@ -772,9 +748,10 @@ document.addEventListener('keydown', e => {
   if (e.key === '-' || e.key === '_') map.zoomOut();
   if (e.key.toLowerCase() === 's')   toggleSatellite();
   if (e.key === 'Escape')            closeDetail();
+  if (e.key === 'r' || e.key === 'R') { clearTimeout(pollTimer); fetchVessels(); }
 });
 
-connect();
+startPolling();
 </script>
 </body>
 </html>

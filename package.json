@@ -1,0 +1,12 @@
+{
+  "name": "hormuz-tracker",
+  "version": "1.0.0",
+  "description": "Real-time AIS ship tracker for the Strait of Hormuz",
+  "private": true,
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

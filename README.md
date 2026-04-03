@@ -1,89 +1,97 @@
 # Hormuz Strait — Live Ship Tracker
 
-A real-time maritime tracking dashboard for the Strait of Hormuz and surrounding Gulf region. Tracks tankers, container ships, and military vessels live via AIS data.
+Real-time AIS vessel tracking for the Strait of Hormuz. Tankers, cargo ships, and military vessels tracked live via AISStream.io, served through a Vercel serverless proxy.
 
-![Satellite view of the Strait of Hormuz with live vessel markers](https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/6/23/39)
-
-## Features
-
-- **Real-time AIS feed** via [AISStream.io](https://aisstream.io) WebSocket — position updates as they arrive
-- **Satellite view** by default (Esri World Imagery), toggle to dark tactical map
-- **Three vessel types** tracked and colour-coded:
-  - 🟠 Tankers (AIS types 80–89)
-  - 🔵 Cargo / Container ships (AIS types 70–79)
-  - 🟢 Military vessels (AIS type 35)
-- **Flag-of-origin icons** — each marker shows the vessel's flag state derived from its MMSI Maritime Identification Digit
-- **Last-known position** — ships silent for 5+ minutes display a faded ghost marker with pulsing ring instead of disappearing. Kept on map for 6 hours
-- **Vessel detail panel** — click any ship for speed, course, heading, nav status, callsign, IMO, and destination
-- **Zoom controls** with keyboard shortcuts (`+` / `-` / `S`)
-- Zero dependencies — single HTML file, no build step
-
-## Live Demo
-
-Deployed at: `https://your-project.vercel.app`
-
-## Tech Stack
-
-| Component | Provider |
-|-----------|----------|
-| AIS data  | AISStream.io WebSocket API |
-| Map       | Leaflet 1.9.4 |
-| Tiles     | Esri ArcGIS Online (satellite + dark canvas) |
-| Hosting   | Vercel (static) |
-| Fonts     | Google Fonts (Barlow Condensed, Share Tech Mono) |
-
-## Repository Structure
+## Architecture
 
 ```
-hormuz-tracker/
-├── index.html       # Complete self-contained app (38 KB)
-├── vercel.json      # Vercel static deployment config
-└── README.md
+Browser (index.html)
+    │  polls /api/vessels every 30s
+    ▼
+Vercel Serverless Function (api/vessels.js)
+    │  opens WebSocket server-side — no CORS issues
+    ▼
+AISStream.io WebSocket API
+    │  streams AIS data for Hormuz bounding box
+    ▼  collected for 8 seconds, returned as JSON
+Vercel Function → Browser
 ```
 
-## Deploy to Vercel
+The AISStream API requires a server-side connection because it does not support browser CORS requests. The Vercel function acts as a transparent proxy — it connects to AISStream via WebSocket, collects 8 seconds of AIS messages, and returns the deduplicated vessel list as a JSON REST response.
 
-### Option A — Vercel CLI
+## Setup
+
+### 1. Clone and install
+
 ```bash
-npm i -g vercel
-vercel --prod
+git clone https://github.com/YOUR_USERNAME/hormuz-tracker
+cd hormuz-tracker
+npm install
 ```
 
-### Option B — Vercel Dashboard
-1. Go to [vercel.com/new](https://vercel.com/new)
-2. Import this repository
-3. Framework preset: **Other**
-4. Click **Deploy** — no build settings needed
+### 2. Set your AISStream API key
 
-### Option C — Drag and drop
-Go to [vercel.com/new](https://vercel.com/new), drag the project folder in.
+In Vercel dashboard → Project → Settings → Environment Variables:
+
+```
+AISSTREAM_API_KEY = your_key_here
+```
+
+Get a free key at [aisstream.io](https://aisstream.io).
+
+For local development, create `.env.local`:
+```
+AISSTREAM_API_KEY=your_key_here
+```
+
+### 3. Deploy to Vercel
+
+```bash
+npx vercel --prod
+```
+
+Or connect your GitHub repo at [vercel.com/new](https://vercel.com/new).
 
 ## Local Development
 
-No server needed — just open `index.html` directly in any modern browser:
-
 ```bash
-open index.html
-# or
-python3 -m http.server 8080
+npx vercel dev
+# → http://localhost:3000
 ```
 
-## AIS Data
+The `vercel dev` command runs both the static frontend and the API function locally, replicating the production environment exactly.
 
-Data is sourced from [AISStream.io](https://aisstream.io). The included API key is pre-configured for the Hormuz bounding box (`[20.5°N, 48.0°E]` → `[30.5°N, 65.0°E]`).
+## Project Structure
 
-To use your own API key, replace the value in `index.html`:
-```javascript
-const API_KEY = 'your_key_here';
+```
+hormuz-tracker/
+├── api/
+│   └── vessels.js       # Serverless function — AISStream WebSocket proxy
+├── index.html           # Frontend — polls /api/vessels, renders Leaflet map
+├── package.json         # ws dependency for the serverless function
+├── vercel.json          # Routes, function config, maxDuration
+└── README.md
 ```
 
-## How Last-Known Position Works
+## Features
 
-| State | Time since last ping | Display |
-|-------|---------------------|---------|
-| Active | < 5 minutes | Full-colour flag + directional arrow |
-| Stale | 5 min – 6 hours | Faded ghost marker + pulsing dashed ring |
-| Removed | > 6 hours | Cleared from map |
+- Real-time positions via AISStream.io (refreshes every 30 seconds)
+- Satellite view by default (Esri World Imagery), toggle to dark map
+- Tankers 🟠, Cargo/Container 🔵, Military 🟢
+- Flag-of-origin icons from MMSI (150+ countries)
+- Last-known position ghost markers (stale after 5 min, removed after 6 hr)
+- Vessel detail panel: speed, course, heading, nav status, IMO, destination
+- Press `R` to force-refresh immediately
+
+## Vercel Function Details
+
+| Setting | Value |
+|---------|-------|
+| Runtime | Node.js 18 |
+| Max duration | 10 seconds (Hobby tier limit) |
+| Memory | 256 MB |
+| Collect window | 8.5 seconds of AIS data |
+| CORS | `Access-Control-Allow-Origin: *` |
 
 ## License
 
