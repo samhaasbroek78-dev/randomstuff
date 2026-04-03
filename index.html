@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hormuz Strait — Live Ship Tracker</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@400;600;700&display=swap');
+
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg:#060c12;--border:#1a3a5c;
+  --accent:#00d4ff;--accent2:#00ff9d;
+  --warn:#ffaa00;--danger:#ff4444;
+  --text:#c8dff0;--muted:#4a7a9b;
+  --tanker:#ff6b35;--cargo:#00d4ff;--military:#39d353;--unknown:#888;
+}
+html,body{width:100%;height:100%;background:var(--bg);color:var(--text);
+  font-family:'Barlow Condensed',sans-serif;overflow:hidden;}
+
+#map{position:absolute;inset:0;z-index:1;}
+.leaflet-container{background:#0d1117!important;}
+.leaflet-control-attribution{
+  background:rgba(6,12,18,0.85)!important;color:var(--muted)!important;font-size:9px!important;}
+
+#scanline{position:absolute;inset:0;pointer-events:none;z-index:2;overflow:hidden;}
+#scanline::after{
+  content:'';position:absolute;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,transparent,rgba(0,212,255,0.07),transparent);
+  animation:scan 7s linear infinite;}
+@keyframes scan{from{top:-2px;}to{top:100%}}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.4;transform:scale(0.8);}}
+
+/* TOP BAR */
+#topbar{
+  position:absolute;top:0;left:0;right:0;z-index:10;height:52px;
+  background:linear-gradient(180deg,rgba(6,12,18,0.97),rgba(6,12,18,0.88));
+  border-bottom:1px solid var(--border);padding:8px 16px;
+  display:flex;align-items:center;gap:14px;}
+#logo{font-family:'Share Tech Mono',monospace;font-size:16px;color:var(--accent);
+  letter-spacing:3px;display:flex;align-items:center;gap:8px;flex-shrink:0;}
+.pulse-dot{width:8px;height:8px;border-radius:50%;background:var(--accent2);
+  animation:pulse 1.4s ease-in-out infinite;}
+.stat-box{background:rgba(0,212,255,0.04);border:1px solid var(--border);border-radius:4px;
+  padding:3px 12px;display:flex;flex-direction:column;min-width:76px;}
+.stat-label{font-size:9px;letter-spacing:2px;color:var(--muted);text-transform:uppercase;}
+.stat-val{font-family:'Share Tech Mono',monospace;font-size:18px;color:var(--accent);line-height:1.15;}
+.stat-val.green{color:var(--accent2);}
+.stat-val.orange{color:var(--tanker);}
+#clock{font-family:'Share Tech Mono',monospace;font-size:12px;color:var(--muted);margin-left:auto;}
+
+/* LEFT PANEL */
+#leftpanel{
+  position:absolute;left:0;top:52px;bottom:28px;width:290px;z-index:10;
+  background:linear-gradient(90deg,rgba(6,12,18,0.97),rgba(6,12,18,0.88));
+  border-right:1px solid var(--border);display:flex;flex-direction:column;
+  transition:transform 0.3s ease;}
+#leftpanel.collapsed{transform:translateX(-266px);}
+#panel-toggle{
+  position:absolute;right:-26px;top:50%;transform:translateY(-50%);
+  width:26px;height:56px;background:rgba(6,12,18,0.95);
+  border:1px solid var(--border);border-left:none;border-radius:0 4px 4px 0;
+  cursor:pointer;display:flex;align-items:center;justify-content:center;
+  font-size:11px;color:var(--accent);}
+.panel-hdr{padding:8px 12px 6px;font-size:9px;letter-spacing:3px;color:var(--muted);
+  border-bottom:1px solid rgba(26,58,92,0.5);text-transform:uppercase;
+  display:flex;justify-content:space-between;align-items:center;flex-shrink:0;}
+.panel-hdr b{color:var(--accent);font-family:'Share Tech Mono',monospace;font-weight:400;}
+#ships-list{flex:1;overflow-y:auto;padding:6px;}
+#ships-list::-webkit-scrollbar{width:3px;}
+#ships-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px;}
+.ship-row{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:3px;
+  cursor:pointer;border-bottom:1px solid rgba(26,58,92,0.25);transition:background 0.12s;}
+.ship-row:hover{background:rgba(0,212,255,0.06);}
+.ship-row.active{background:rgba(0,212,255,0.1);border-left:2px solid var(--accent);padding-left:6px;}
+.ship-flag{font-size:18px;flex-shrink:0;line-height:1;}
+.ship-info{flex:1;min-width:0;}
+.ship-name{font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.ship-meta{font-size:10px;color:var(--muted);margin-top:1px;}
+.badge{font-size:8px;padding:2px 5px;border-radius:2px;letter-spacing:1px;flex-shrink:0;text-transform:uppercase;}
+.badge-tanker{background:rgba(255,107,53,0.15);color:var(--tanker);border:1px solid rgba(255,107,53,0.3);}
+.badge-cargo{background:rgba(0,212,255,0.1);color:var(--accent);border:1px solid rgba(0,212,255,0.2);}
+.badge-military{background:rgba(57,211,83,0.1);color:var(--military);border:1px solid rgba(57,211,83,0.3);}
+.badge-unknown{background:rgba(136,136,136,0.1);color:var(--unknown);border:1px solid rgba(136,136,136,0.25);}
+
+/* RIGHT DETAIL PANEL */
+#detailpanel{
+  position:absolute;right:0;top:52px;bottom:28px;width:280px;z-index:10;
+  background:linear-gradient(270deg,rgba(6,12,18,0.97),rgba(6,12,18,0.88));
+  border-left:1px solid var(--border);display:flex;flex-direction:column;
+  transform:translateX(100%);transition:transform 0.3s ease;}
+#detailpanel.open{transform:translateX(0);}
+#detail-close{
+  position:absolute;left:-28px;top:12px;width:28px;height:28px;
+  background:rgba(6,12,18,0.95);border:1px solid var(--border);border-right:none;
+  border-radius:4px 0 0 4px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px;}
+#detail-close:hover{color:var(--text);}
+#detail-scroll{flex:1;overflow-y:auto;padding:14px;}
+#detail-scroll::-webkit-scrollbar{width:3px;}
+#detail-scroll::-webkit-scrollbar-thumb{background:var(--border);}
+.dflag{font-size:44px;margin-bottom:6px;display:block;}
+.dname{font-size:18px;font-weight:700;color:var(--accent);letter-spacing:1px;margin-bottom:2px;}
+.dmmsi{font-family:'Share Tech Mono',monospace;font-size:10px;color:var(--muted);}
+.dgrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:12px;}
+.dcell{background:rgba(0,212,255,0.04);border:1px solid var(--border);border-radius:3px;padding:6px 8px;}
+.dlabel{font-size:8px;letter-spacing:2px;color:var(--muted);text-transform:uppercase;}
+.dval{font-family:'Share Tech Mono',monospace;font-size:14px;color:var(--text);margin-top:2px;}
+.dval.ac{color:var(--accent);}
+.dval.or{color:var(--tanker);}
+.dval.wn{color:var(--warn);}
+.dval.gr{color:var(--accent2);}
+.dextra{margin-top:8px;padding:8px 10px;border:1px solid var(--border);border-radius:3px;
+  background:rgba(0,212,255,0.03);display:grid;grid-template-columns:1fr 1fr;gap:6px;}
+.dextra .full{grid-column:1/-1;}
+.dextra-label{font-size:8px;letter-spacing:2px;color:var(--muted);text-transform:uppercase;}
+.dextra-val{font-family:'Share Tech Mono',monospace;font-size:12px;margin-top:2px;}
+.center-btn{
+  margin-top:10px;width:100%;padding:8px;
+  background:rgba(0,212,255,0.08);border:1px solid rgba(0,212,255,0.25);border-radius:3px;
+  color:var(--accent);font-family:'Barlow Condensed',sans-serif;font-size:12px;
+  letter-spacing:2px;cursor:pointer;transition:background 0.15s;}
+.center-btn:hover{background:rgba(0,212,255,0.16);}
+
+/* MAP CONTROLS */
+#map-controls{position:absolute;right:10px;top:62px;z-index:10;display:flex;flex-direction:column;gap:4px;}
+.mctrl{width:36px;height:36px;background:rgba(6,12,18,0.92);border:1px solid var(--border);
+  border-radius:4px;color:var(--accent);font-size:20px;font-family:'Share Tech Mono',monospace;
+  cursor:pointer;display:flex;align-items:center;justify-content:center;
+  transition:background 0.12s,border-color 0.12s;user-select:none;}
+.mctrl:hover{background:rgba(0,212,255,0.1);border-color:var(--accent);}
+.mctrl:active{transform:scale(0.93);}
+.zdivider{height:1px;background:var(--border);margin:0 3px;}
+#sat-btn{width:auto;height:28px;padding:0 9px;font-size:9px;letter-spacing:2px;
+  font-family:'Barlow Condensed',sans-serif;font-weight:600;color:var(--muted);gap:4px;margin-top:4px;}
+#sat-btn.active{color:var(--accent2);border-color:var(--accent2);background:rgba(0,255,157,0.07);}
+
+/* LEGEND */
+#legend{position:absolute;left:300px;bottom:36px;z-index:10;
+  background:rgba(6,12,18,0.9);border:1px solid var(--border);
+  border-radius:4px;padding:8px 12px;font-size:10px;}
+.leg-row{display:flex;align-items:center;gap:7px;margin:3px 0;}
+.leg-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;}
+
+/* STATUS BAR */
+#statusbar{position:absolute;bottom:0;left:0;right:0;height:28px;z-index:10;
+  background:linear-gradient(0deg,rgba(6,12,18,0.97),rgba(6,12,18,0.88));
+  border-top:1px solid var(--border);padding:0 16px;
+  display:flex;align-items:center;gap:12px;
+  font-family:'Share Tech Mono',monospace;font-size:10px;color:var(--muted);letter-spacing:1px;}
+#conn-status{display:flex;align-items:center;gap:5px;}
+.cdot{width:6px;height:6px;border-radius:50%;}
+.cdot.connected{background:var(--accent2);animation:pulse 2s infinite;}
+.cdot.connecting{background:var(--warn);animation:pulse 0.8s infinite;}
+.cdot.error{background:var(--danger);}
+.sep{opacity:0.3;}
+
+/* CORNER ACCENTS */
+.corner{position:absolute;width:18px;height:18px;pointer-events:none;z-index:11;}
+.corner.tl{top:56px;left:294px;border-top:1px solid rgba(0,212,255,0.4);border-left:1px solid rgba(0,212,255,0.4);}
+.corner.tr{top:56px;right:3px;border-top:1px solid rgba(0,212,255,0.4);border-right:1px solid rgba(0,212,255,0.4);}
+.corner.bl{bottom:32px;left:294px;border-bottom:1px solid rgba(0,212,255,0.4);border-left:1px solid rgba(0,212,255,0.4);}
+.corner.br{bottom:32px;right:3px;border-bottom:1px solid rgba(0,212,255,0.4);border-right:1px solid rgba(0,212,255,0.4);}
+
+/* SHIP MARKERS — flag stays upright, only arrow element rotates */
+.sm-wrap{display:flex;flex-direction:column;align-items:center;cursor:pointer;}
+.sm-flag{font-size:13px;line-height:1;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.9));}
+.sm-arrow{width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;margin-top:1px;}
+.sm-arrow.tanker{border-bottom:10px solid var(--tanker);}
+.sm-arrow.cargo{border-bottom:10px solid var(--cargo);}
+.sm-arrow.military{border-bottom:10px solid var(--military);}
+.sm-arrow.unknown{border-bottom:10px solid var(--unknown);}
+
+/* Stale (last-known) markers — dimmed, no arrow, ghost ring */
+.sm-wrap.stale{opacity:0.42;filter:grayscale(0.5);}
+.sm-ring{
+  width:18px;height:18px;border-radius:50%;margin-top:2px;
+  border:1.5px dashed rgba(255,255,255,0.45);
+  animation:ring-pulse 3s ease-in-out infinite;
+}
+@keyframes ring-pulse{0%,100%{transform:scale(1);opacity:0.45;}50%{transform:scale(1.25);opacity:0.2;}}
+.badge-stale{background:rgba(255,170,0,0.12);color:var(--warn);border:1px solid rgba(255,170,0,0.3);}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="scanline"></div>
+
+<div id="topbar">
+  <div id="logo"><div class="pulse-dot"></div>HORMUZ TRACKER</div>
+  <div class="stat-box"><span class="stat-label">Live</span><span class="stat-val green" id="cnt-total">0</span></div>
+  <div class="stat-box"><span class="stat-label">Tankers</span><span class="stat-val orange" id="cnt-tanker">0</span></div>
+  <div class="stat-box"><span class="stat-label">Cargo</span><span class="stat-val" id="cnt-cargo">0</span></div>
+  <div class="stat-box"><span class="stat-label">Military</span><span class="stat-val" style="color:var(--military)" id="cnt-military">0</span></div>
+  <div class="stat-box"><span class="stat-label">Avg Spd</span><span class="stat-val" id="cnt-spd">— kt</span></div>
+  <div id="clock">UTC 00:00:00</div>
+</div>
+
+<div id="leftpanel">
+  <div class="panel-hdr">Active vessels <b id="list-count">0</b>
+    <div id="panel-toggle" onclick="togglePanel()">◀</div>
+  </div>
+  <div id="ships-list"></div>
+</div>
+
+<div id="detailpanel">
+  <div id="detail-close" onclick="closeDetail()">✕</div>
+  <div id="detail-scroll"><div id="detail-inner"></div></div>
+</div>
+
+<div class="corner tl"></div><div class="corner tr"></div>
+<div class="corner bl"></div><div class="corner br"></div>
+
+<div id="map-controls">
+  <div class="mctrl" onclick="map.zoomIn()" title="Zoom in (+)">+</div>
+  <div class="zdivider"></div>
+  <div class="mctrl" onclick="map.zoomOut()" title="Zoom out (-)">−</div>
+  <button id="sat-btn" class="mctrl active" onclick="toggleSatellite()" title="Toggle map view (S)">
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" style="flex-shrink:0">
+      <path d="M2 2h4v4H2zm8 0h4v4h-4zM2 10h4v4H2zm8 0h4v4h-4z"/>
+    </svg>DARK
+  </button>
+</div>
+
+<div id="legend">
+  <div style="font-size:8px;letter-spacing:2px;color:var(--muted);margin-bottom:5px;">VESSEL TYPE</div>
+  <div class="leg-row"><div class="leg-dot" style="background:var(--tanker)"></div><span>Tanker</span></div>
+  <div class="leg-row"><div class="leg-dot" style="background:var(--cargo)"></div><span>Cargo / Container</span></div>
+  <div class="leg-row"><div class="leg-dot" style="background:var(--military)"></div><span>Military</span></div>
+  <div class="leg-row"><div class="leg-dot" style="background:var(--unknown)"></div><span>Pending type</span></div>
+  <div class="leg-row"><div class="leg-dot" style="background:rgba(255,255,255,0.25);border:1.5px dashed rgba(255,255,255,0.5);box-sizing:border-box;"></div><span style="color:var(--warn)">Last known pos.</span></div>
+  <div style="margin-top:7px;padding-top:7px;border-top:1px solid var(--border);
+    font-size:8px;letter-spacing:2px;color:var(--muted);">ICON = FLAG STATE</div>
+</div>
+
+<div id="statusbar">
+  <div id="conn-status">
+    <div class="cdot connecting" id="conn-dot"></div>
+    <span id="conn-text">CONNECTING...</span>
+  </div>
+  <span class="sep">|</span><span id="zoom-display">ZOOM 7</span>
+  <span class="sep">|</span><span id="last-fix">NO DATA</span>
+  <span class="sep">|</span><span>AISSTREAM.IO</span>
+  <span class="sep">|</span><span id="msg-count">0 MSG</span>
+</div>
+
+<script>
+'use strict';
+
+/* ── CONSTANTS ── */
+const API_KEY    = 'd21c20e747d0f62ba644a175a77dd0ebb20db4a0';
+const CENTER     = [26.3, 56.5];
+const BB         = [[[20.5, 48.0], [30.5, 65.0]]];
+const STALE_DIM  = 300_000;    // 5 min  — fade marker, show last-known position
+const STALE_REMOVE = 21_600_000; // 6 hr  — remove entirely
+
+const TANKER_TYPES   = new Set([80,81,82,83,84,85,86,87,88,89]);
+const CARGO_TYPES    = new Set([70,71,72,73,74,75,76,77,78,79]);
+const MILITARY_TYPES = new Set([35]); // AIS type 35 = Military ops
+
+/* ── MID LOOKUP ── */
+const MID_FLAG = {
+  201:'🇦🇱',202:'🇦🇩',203:'🇦🇹',204:'🇵🇹',205:'🇧🇪',206:'🇧🇾',207:'🇧🇬',209:'🇨🇾',210:'🇨🇾',
+  211:'🇩🇪',212:'🇨🇾',213:'🇬🇪',214:'🇲🇩',215:'🇲🇹',216:'🇦🇲',218:'🇩🇪',219:'🇩🇰',220:'🇩🇰',
+  224:'🇪🇸',225:'🇪🇸',226:'🇫🇷',227:'🇫🇷',228:'🇫🇷',229:'🇲🇹',230:'🇫🇮',231:'🇫🇴',
+  232:'🇬🇧',233:'🇬🇧',234:'🇬🇧',235:'🇬🇧',236:'🇬🇮',237:'🇬🇷',238:'🇭🇷',239:'🇬🇷',240:'🇬🇷',
+  241:'🇬🇷',242:'🇲🇦',243:'🇭🇺',244:'🇳🇱',245:'🇳🇱',246:'🇳🇱',247:'🇮🇹',248:'🇲🇹',249:'🇲🇹',
+  250:'🇮🇪',251:'🇮🇸',252:'🇱🇮',253:'🇱🇺',254:'🇲🇨',255:'🇵🇹',256:'🇲🇹',257:'🇳🇴',258:'🇳🇴',
+  259:'🇳🇴',261:'🇵🇱',262:'🇲🇪',263:'🇵🇹',264:'🇷🇴',265:'🇸🇪',266:'🇸🇪',267:'🇸🇰',268:'🇸🇲',
+  269:'🇨🇭',270:'🇨🇿',271:'🇹🇷',272:'🇺🇦',273:'🇷🇺',274:'🇲🇰',275:'🇪🇪',276:'🇱🇻',277:'🇱🇻',
+  278:'🇱🇹',279:'🇷🇺',303:'🇺🇸',304:'🇦🇬',305:'🇦🇬',306:'🇨🇼',307:'🇦🇼',308:'🇧🇸',309:'🇧🇸',
+  310:'🇧🇲',311:'🇧🇸',312:'🇧🇿',314:'🇧🇧',316:'🇨🇦',319:'🇰🇾',323:'🇨🇷',325:'🇨🇺',327:'🇩🇴',
+  330:'🇬🇩',332:'🇬🇹',334:'🇭🇳',336:'🇯🇲',338:'🇺🇸',339:'🇵🇦',341:'🇰🇳',343:'🇱🇨',345:'🇲🇽',
+  347:'🇲🇶',350:'🇳🇮',351:'🇵🇦',352:'🇵🇦',353:'🇵🇦',354:'🇵🇦',355:'🇵🇦',356:'🇵🇦',357:'🇵🇦',
+  358:'🇵🇷',359:'🇸🇻',362:'🇹🇹',364:'🇹🇨',366:'🇺🇸',367:'🇺🇸',368:'🇺🇸',369:'🇺🇸',370:'🇵🇦',
+  371:'🇵🇦',372:'🇵🇦',373:'🇵🇦',374:'🇵🇦',375:'🇻🇨',376:'🇻🇬',377:'🇻🇮',378:'🇻🇬',379:'🇸🇷',
+  401:'🇦🇫',403:'🇸🇦',405:'🇧🇩',408:'🇧🇭',410:'🇧🇹',412:'🇨🇳',413:'🇨🇳',414:'🇨🇳',416:'🇹🇼',
+  419:'🇮🇳',422:'🇮🇷',423:'🇦🇿',425:'🇵🇰',431:'🇯🇵',432:'🇯🇵',434:'🇹🇲',436:'🇦🇪',437:'🇦🇪',
+  438:'🇰🇼',439:'🇰🇷',440:'🇰🇷',441:'🇰🇷',447:'🇰🇼',450:'🇰🇭',451:'🇮🇶',453:'🇧🇭',455:'🇶🇦',
+  457:'🇲🇻',459:'🇯🇴',461:'🇴🇲',463:'🇦🇪',466:'🇶🇦',468:'🇸🇾',470:'🇦🇪',471:'🇦🇪',472:'🇦🇪',
+  473:'🇾🇲',477:'🇭🇰',478:'🇧🇦',503:'🇦🇺',506:'🇲🇲',508:'🇧🇳',512:'🇳🇿',525:'🇮🇩',533:'🇲🇾',
+  538:'🇲🇭',540:'🇳🇨',542:'🇳🇿',546:'🇫🇷',548:'🇵🇭',557:'🇸🇧',563:'🇸🇬',564:'🇸🇬',565:'🇸🇬',
+  566:'🇸🇬',567:'🇹🇭',574:'🇻🇳',576:'🇻🇺',601:'🇿🇦',603:'🇦🇴',605:'🇩🇿',618:'🇪🇬',620:'🇪🇬',
+  636:'🇱🇷',637:'🇱🇷',638:'🇱🇾',642:'🇱🇾',659:'🇳🇬',665:'🇸🇨',710:'🇧🇷',720:'🇦🇷',725:'🇨🇱',
+  730:'🇨🇴',735:'🇪🇨',750:'🇬🇾',760:'🇵🇪',770:'🇺🇾',775:'🇻🇪',
+};
+const MID_NAME = {
+  211:'Germany',219:'Denmark',220:'Denmark',224:'Spain',226:'France',228:'France',230:'Finland',
+  232:'UK',233:'UK',234:'UK',235:'UK',237:'Greece',238:'Croatia',244:'Netherlands',247:'Italy',
+  257:'Norway',261:'Poland',265:'Sweden',271:'Turkey',272:'Ukraine',273:'Russia',275:'Estonia',
+  277:'Latvia',278:'Lithuania',303:'USA',308:'Bahamas',309:'Bahamas',311:'Bahamas',312:'Belize',
+  316:'Canada',319:'Cayman Is.',338:'USA',339:'Panama',351:'Panama',352:'Panama',353:'Panama',
+  354:'Panama',355:'Panama',356:'Panama',357:'Panama',366:'USA',367:'USA',368:'USA',369:'USA',
+  370:'Panama',371:'Panama',372:'Panama',373:'Panama',374:'Panama',403:'Saudi Arabia',
+  405:'Bangladesh',408:'Bahrain',412:'China',413:'China',414:'China',416:'Taiwan',419:'India',
+  422:'Iran',423:'Azerbaijan',425:'Pakistan',431:'Japan',432:'Japan',434:'Turkmenistan',
+  436:'UAE',437:'UAE',438:'Kuwait',439:'S. Korea',440:'S. Korea',441:'S. Korea',447:'Kuwait',
+  451:'Iraq',453:'Bahrain',455:'Qatar',461:'Oman',463:'UAE',466:'Qatar',470:'UAE',471:'UAE',
+  472:'UAE',473:'Yemen',477:'Hong Kong',503:'Australia',525:'Indonesia',533:'Malaysia',
+  538:'Marshall Is.',548:'Philippines',563:'Singapore',564:'Singapore',565:'Singapore',
+  566:'Singapore',567:'Thailand',574:'Vietnam',601:'South Africa',603:'Angola',605:'Algeria',
+  620:'Egypt',636:'Liberia',638:'Libya',659:'Nigeria',710:'Brazil',720:'Argentina',725:'Chile',
+};
+
+function getMID(mmsi)    { return mmsi ? Math.floor(mmsi / 1_000_000) : null; }
+function getFlag(mmsi)   { return MID_FLAG[getMID(mmsi)] || '🏴'; }
+function getCountry(m)   { const mid = getMID(m); return MID_NAME[mid] || ('MID-' + mid); }
+function isTanker(t)     { return TANKER_TYPES.has(t); }
+function isCargo(t)      { return CARGO_TYPES.has(t); }
+function isMilitary(t)   { return MILITARY_TYPES.has(t); }
+function isKnown(t)      { return isTanker(t) || isCargo(t) || isMilitary(t); }
+function isWrongType(t)  { return t > 0 && !isKnown(t); }
+
+function typeName(t) {
+  if (isTanker(t))   return 'Tanker';
+  if (isMilitary(t)) return 'Military';
+  const n = {70:'Cargo',71:'Cargo',72:'Refrigerated',73:'Container',74:'Bulk Carrier',
+             75:'Cargo',76:'Cargo',77:'Cargo',78:'Cargo',79:'Cargo'};
+  return n[t] || (t ? 'Vessel' : 'Pending');
+}
+function arrowClass(t)  { return isTanker(t) ? 'tanker' : isCargo(t) ? 'cargo' : isMilitary(t) ? 'military' : 'unknown'; }
+function badgeClass(t)  { return isTanker(t) ? 'badge-tanker' : isCargo(t) ? 'badge-cargo' : isMilitary(t) ? 'badge-military' : 'badge-unknown'; }
+function badgeLabel(t)  { return isTanker(t) ? 'TANKER' : isCargo(t) ? 'CARGO' : isMilitary(t) ? 'MILITARY' : 'UNKNOWN'; }
+
+const NAV = ['Under Way','Anchored','Not Under Cmd','Restricted','Constrained','Moored',
+             'Aground','Fishing','Sailing'];
+function navStat(s) { return (s >= 0 && s < NAV.length) ? NAV[s] : '—'; }
+
+/* ── MAP ── */
+const map = L.map('map', {
+  center: CENTER, zoom: 7,
+  zoomControl: false, attributionControl: true,
+  maxZoom: 19, minZoom: 4,
+});
+
+const darkBase  = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+  { attribution: '© Esri', maxZoom: 16 });
+const darkRef   = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
+  { attribution: '', maxZoom: 16, opacity: 0.9 });
+const satBase   = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  { attribution: '© Esri, Maxar', maxZoom: 19 });
+const satLabels = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+  { attribution: '', maxZoom: 19, opacity: 0.85 });
+
+// Satellite is the default view
+let isSatellite = true;
+satBase.addTo(map);
+satLabels.addTo(map);
+
+function toggleSatellite() {
+  isSatellite = !isSatellite;
+  const btn = document.getElementById('sat-btn');
+  if (isSatellite) {
+    map.removeLayer(darkBase); map.removeLayer(darkRef);
+    satBase.addTo(map); satLabels.addTo(map);
+    map.setMaxZoom(19);
+    btn.classList.add('active');
+    btn.innerHTML = SAT_BTN_DARK;
+  } else {
+    map.removeLayer(satBase); map.removeLayer(satLabels);
+    darkBase.addTo(map); darkRef.addTo(map);
+    if (map.getZoom() > 16) map.setZoom(16);
+    map.setMaxZoom(16);
+    btn.classList.remove('active');
+    btn.innerHTML = SAT_BTN_SAT;
+  }
+}
+
+// Button label constants (satellite is default so start in DARK label)
+const SAT_BTN_DARK = `<svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" style="flex-shrink:0"><path d="M2 2h4v4H2zm8 0h4v4h-4zM2 10h4v4H2zm8 0h4v4h-4z"/></svg>DARK`;
+const SAT_BTN_SAT  = `<svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" style="flex-shrink:0"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4" stroke="currentColor" stroke-width="1.4" fill="none"/></svg>SAT`;
+
+map.on('zoomend', () => {
+  document.getElementById('zoom-display').textContent = 'ZOOM ' + map.getZoom();
+});
+
+/* ── STATE (declared before use) ── */
+const ships        = new Map();
+const staticCache  = new Map();
+const pendingRemoval = new Map(); // mmsi → setTimeout id for grace-period removal
+let ws             = null;
+let noDataTimer    = null;
+let reconnects     = 0;
+let msgCount       = 0;
+let renderPending  = false;
+let panelOpen      = true;
+let selectedMMSI   = null;
+
+/* ── MARKER ── */
+function isStale(ship) { return (Date.now() - (ship.updated || 0)) > STALE_DIM; }
+
+function makeIcon(ship) {
+  const flag  = getFlag(ship.mmsi);
+  const stale = isStale(ship);
+  let html;
+  if (stale) {
+    // Last-known position: dimmed flag + pulsing ghost ring, no directional arrow
+    html = `<div class="sm-wrap stale">
+      <div class="sm-flag">${flag}</div>
+      <div class="sm-ring"></div>
+    </div>`;
+  } else {
+    const deg = isFinite(ship.cog) ? ship.cog : 0;
+    const cls = arrowClass(ship.type);
+    html = `<div class="sm-wrap">
+      <div class="sm-flag">${flag}</div>
+      <div class="sm-arrow ${cls}" style="transform:rotate(${deg}deg);transform-origin:50% 0;"></div>
+    </div>`;
+  }
+  return L.divIcon({ html, className: '', iconSize: [22, 28], iconAnchor: [11, 11] });
+}
+
+/* ── UPSERT SHIP ── */
+// Accept ALL vessels with valid coordinates.
+// Type drives colour only. Non-commercial vessels are removed on a 30s grace timer
+// once static data confirms their type, so tankers/cargo always appear immediately.
+function upsertShip(data) {
+  const mmsi = data.mmsi;
+
+  // Cancel any scheduled removal for this MMSI (fresh position data = still active)
+  if (pendingRemoval.has(mmsi)) {
+    clearTimeout(pendingRemoval.get(mmsi));
+    pendingRemoval.delete(mmsi);
+  }
+
+  if (ships.has(mmsi)) {
+    const s = ships.get(mmsi);
+    if (!data.type && s.type) data.type = s.type;  // preserve confirmed type
+    Object.assign(s, data);
+    s.updated = Date.now();
+    s.marker.setLatLng([s.lat, s.lon]);
+    s.marker.setIcon(makeIcon(s));  // always refresh — reverts ghost to active
+  } else {
+    const marker = L.marker([data.lat, data.lon], { icon: makeIcon(data) }).addTo(map);
+    marker.on('click', () => showDetail(mmsi));
+    ships.set(mmsi, { ...data, marker, updated: Date.now() });
+  }
+  scheduleRender();
+}
+
+/* ── HELPERS ── */
+function lastSeenStr(ageMs) {
+  const s = Math.round(ageMs / 1000);
+  if (s < 60)   return `last seen ${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60)   return `last seen ${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24)   return `last seen ${h}h ago`;
+  return `last seen ${Math.round(h / 24)}d ago`;
+}
+
+/* ── RENDER (rAF-batched) ── */
+function scheduleRender() {
+  if (renderPending) return;
+  renderPending = true;
+  requestAnimationFrame(() => { renderPending = false; renderStats(); renderList(); });
+}
+
+function renderStats() {
+  let tankers = 0, cargo = 0, military = 0, staleCount = 0, speedSum = 0, speedN = 0;
+  ships.forEach(s => {
+    if (isStale(s)) { staleCount++; return; }
+    if (isTanker(s.type))   tankers++;
+    else if (isCargo(s.type))    cargo++;
+    else if (isMilitary(s.type)) military++;
+    if (s.sog > 0.1 && s.sog < 50) { speedSum += s.sog; speedN++; }
+  });
+  document.getElementById('cnt-total').textContent    = ships.size;
+  document.getElementById('cnt-tanker').textContent   = tankers;
+  document.getElementById('cnt-cargo').textContent    = cargo;
+  document.getElementById('cnt-military').textContent = military;
+  document.getElementById('cnt-spd').textContent      = speedN ? (speedSum / speedN).toFixed(1) + ' kt' : '— kt';
+  document.getElementById('list-count').textContent   = ships.size;
+}
+
+function renderList() {
+  const sorted = [...ships.values()]
+    .sort((a, b) => (b.updated || 0) - (a.updated || 0))
+    .slice(0, 100);
+
+  document.getElementById('ships-list').innerHTML = sorted.map(s => {
+    const stale  = isStale(s);
+    const name   = (s.name || ('MMSI ' + s.mmsi)).substring(0, 24);
+    const age    = Date.now() - (s.updated || 0);
+    const spd    = (!stale && s.sog != null) ? s.sog.toFixed(1) + ' kt' : lastSeenStr(age);
+    const act    = selectedMMSI === s.mmsi ? ' active' : '';
+    const dimmed = stale ? ' style="opacity:0.5"' : '';
+    const badge  = stale
+      ? `<span class="badge badge-stale">LAST POS</span>`
+      : `<span class="badge ${badgeClass(s.type)}">${badgeLabel(s.type)}</span>`;
+    return `<div class="ship-row${act}"${dimmed} onclick="showDetail(${s.mmsi})">
+      <div class="ship-flag">${getFlag(s.mmsi)}</div>
+      <div class="ship-info">
+        <div class="ship-name">${name}</div>
+        <div class="ship-meta">${spd} · ${getCountry(s.mmsi)}</div>
+      </div>
+      ${badge}
+    </div>`;
+  }).join('');
+}
+
+/* ── DETAIL PANEL ── */
+function showDetail(mmsi) {
+  selectedMMSI = mmsi;
+  const s = ships.get(mmsi);
+  if (!s) return;
+  document.getElementById('detailpanel').classList.add('open');
+
+  const age     = Date.now() - (s.updated || Date.now());
+  const stale   = age > STALE_DIM;
+  const ageStr  = stale ? lastSeenStr(age) : (age < 60000 ? Math.round(age/1000)+'s ago' : Math.round(age/60000)+'m ago');
+  const sc      = staticCache.get(mmsi) || {};
+  const dest    = (s.dest || sc.dest || '—').toUpperCase();
+  const call    = s.callsign || sc.callsign || '—';
+  const imo     = s.imo || sc.imo || 0;
+
+  const staleBanner = stale ? `
+    <div style="margin-bottom:12px;padding:7px 10px;border-radius:3px;
+      background:rgba(255,170,0,0.1);border:1px solid rgba(255,170,0,0.35);
+      display:flex;align-items:center;gap:8px;">
+      <div style="width:7px;height:7px;border-radius:50%;border:1.5px dashed var(--warn);flex-shrink:0;animation:ring-pulse 2s ease-in-out infinite;"></div>
+      <div>
+        <div style="font-size:8px;letter-spacing:2px;color:var(--warn);text-transform:uppercase;">Last Known Position</div>
+        <div style="font-family:'Share Tech Mono',monospace;font-size:11px;color:var(--warn);margin-top:1px;">${ageStr}</div>
+      </div>
+    </div>` : '';
+
+  document.getElementById('detail-inner').innerHTML = `
+    ${staleBanner}
+    <span class="dflag">${getFlag(mmsi)}</span>
+    <div class="dname">${s.name || ('MMSI ' + mmsi)}</div>
+    <div class="dmmsi">MMSI: ${mmsi} &nbsp;·&nbsp; ${getCountry(mmsi)}</div>
+    <div class="dgrid">
+      <div class="dcell"><div class="dlabel">Type</div>
+        <div class="dval ${isTanker(s.type)?'or':isCargo(s.type)?'ac':''}">${typeName(s.type)}</div></div>
+      <div class="dcell"><div class="dlabel">Speed</div>
+        <div class="dval ${stale?'wn':''}">${stale ? '— (stale)' : (s.sog != null ? s.sog.toFixed(1)+' kt' : '—')}</div></div>
+      <div class="dcell"><div class="dlabel">Course</div>
+        <div class="dval">${isFinite(s.cog) ? Math.round(s.cog)+'°' : '—'}</div></div>
+      <div class="dcell"><div class="dlabel">Heading</div>
+        <div class="dval">${s.hdg && s.hdg!==511 ? Math.round(s.hdg)+'°' : '—'}</div></div>
+      <div class="dcell"><div class="dlabel">Latitude</div>
+        <div class="dval">${s.lat.toFixed(4)}°</div></div>
+      <div class="dcell"><div class="dlabel">Longitude</div>
+        <div class="dval">${s.lon.toFixed(4)}°</div></div>
+      <div class="dcell"><div class="dlabel">Nav Status</div>
+        <div class="dval" style="font-size:11px">${navStat(s.status)}</div></div>
+      <div class="dcell"><div class="dlabel">${stale ? 'Last Fix' : 'Updated'}</div>
+        <div class="dval wn" style="font-size:11px">${ageStr}</div></div>
+    </div>
+    <div class="dextra">
+      <div><div class="dextra-label">Callsign</div><div class="dextra-val">${call}</div></div>
+      <div><div class="dextra-label">IMO</div><div class="dextra-val">${imo||'—'}</div></div>
+      <div class="full"><div class="dextra-label">Destination</div>
+        <div class="dextra-val" style="color:var(--accent2)">${dest}</div></div>
+    </div>
+    <button class="center-btn" onclick="panToShip(${mmsi})">◎ CENTER ON VESSEL</button>`;
+  renderList();
+}
+
+function panToShip(mmsi) {
+  const s = ships.get(mmsi);
+  if (!s) return;
+  // Keep current zoom if already zoomed in further than 10
+  map.setView([s.lat, s.lon], Math.max(map.getZoom(), 10));
+}
+
+function closeDetail() {
+  selectedMMSI = null;
+  document.getElementById('detailpanel').classList.remove('open');
+  renderList();
+}
+
+function togglePanel() {
+  panelOpen = !panelOpen;
+  document.getElementById('leftpanel').classList.toggle('collapsed', !panelOpen);
+  document.getElementById('panel-toggle').textContent = panelOpen ? '◀' : '▶';
+}
+
+/* ── CLOCK ── */
+function pad(v) { return String(v).padStart(2, '0'); }
+function updateClock() {
+  const n = new Date();
+  document.getElementById('clock').textContent =
+    `UTC ${pad(n.getUTCHours())}:${pad(n.getUTCMinutes())}:${pad(n.getUTCSeconds())}`;
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+/* ── STATUS HELPERS ── */
+function setStatus(state, text) {
+  document.getElementById('conn-dot').className = 'cdot ' + state;
+  document.getElementById('conn-text').textContent = text;
+}
+function updateFix() {
+  const n = new Date();
+  document.getElementById('last-fix').textContent =
+    `FIX ${pad(n.getUTCHours())}:${pad(n.getUTCMinutes())}:${pad(n.getUTCSeconds())} UTC`;
+  document.getElementById('msg-count').textContent = msgCount + ' MSG';
+}
+
+/* ── STALE SWEEP — runs every 60s ── */
+setInterval(() => {
+  const now    = Date.now();
+  const remove = now - STALE_REMOVE;
+  const dim    = now - STALE_DIM;
+  ships.forEach((s, mmsi) => {
+    if (s.updated < remove) {
+      // Gone for 6+ hours — remove entirely
+      s.marker.remove();
+      ships.delete(mmsi);
+    } else if (s.updated < dim) {
+      // 5 min+ silent — refresh icon to ghost/stale appearance
+      s.marker.setIcon(makeIcon(s));
+    }
+  });
+  scheduleRender();
+}, 60_000);
+
+/* ── WEBSOCKET ── */
+function connect() {
+  setStatus('connecting', 'CONNECTING...');
+  clearTimeout(noDataTimer);
+  if (ws) { try { ws.close(); } catch (_) {} ws = null; }
+
+  ws = new WebSocket('wss://stream.aisstream.io/v0/stream');
+
+  ws.onopen = () => {
+    reconnects = 0;
+    setStatus('connected', 'CONNECTED · LIVE');
+    // Warn if no data received within 20 seconds
+    noDataTimer = setTimeout(() => {
+      setStatus('error', 'CONNECTED — NO DATA · CHECK API KEY');
+    }, 20_000);
+    ws.send(JSON.stringify({
+      APIKey: API_KEY,
+      BoundingBoxes: BB,
+      // No FilterMessageTypes — receive ALL AIS message types from AISStream.
+      // Filtering server-side can silently drop vessels whose static data
+      // isn't in AISStream's cache at that moment.
+    }));
+  };
+
+  ws.onmessage = e => {
+    try {
+      const msg = JSON.parse(e.data);
+
+      // AISStream sends JSON error objects for auth failures / rate limits
+      if (msg.error || msg.Error) {
+        const err = msg.error || msg.Error;
+        setStatus('error', ('API ERR: ' + String(err)).substring(0, 50));
+        console.error('[AIS] API error:', err);
+        return;
+      }
+
+      const meta = msg.MetaData || {};
+      const mmsi = parseInt(meta.MMSI || meta.MMSI_String || 0);
+      if (!mmsi) return;
+
+      msgCount++;
+      if (msgCount === 1) { clearTimeout(noDataTimer); updateFix(); }
+      else if (msgCount % 5 === 0) updateFix();
+
+      /* ── Static data (AIS type 5 / 24) ── */
+      if (msg.MessageType === 'ShipStaticData') {
+        const sd       = msg.Message?.ShipStaticData || {};
+        const type     = parseInt(sd.Type || sd.ShipType || meta.ShipType || 0) || 0;
+        const name     = (sd.Name || sd.ShipName || meta.ShipName || '').trim();
+        const dest     = (sd.Destination || '').trim();
+        const callsign = (sd.CallSign || sd.Callsign || '').trim();
+        const imo      = parseInt(sd.ImoNumber || sd.IMO || 0) || 0;
+        const prev     = staticCache.get(mmsi) || {};
+
+        staticCache.set(mmsi, {
+          type:     type     || prev.type     || 0,
+          name:     name     || prev.name     || '',
+          dest:     dest     || prev.dest     || '',
+          callsign: callsign || prev.callsign || '',
+          imo:      imo      || prev.imo      || 0,
+        });
+
+        if (ships.has(mmsi)) {
+          const s = ships.get(mmsi);
+          if (type)     s.type     = type;
+          if (name)     s.name     = name;
+          if (dest)     s.dest     = dest;
+          if (callsign) s.callsign = callsign;
+          if (imo)      s.imo      = imo;
+
+          if (type > 0 && !isKnown(type)) {
+            // Non-commercial confirmed — schedule removal after 30s grace
+            if (!pendingRemoval.has(mmsi)) {
+              pendingRemoval.set(mmsi, setTimeout(() => {
+                if (ships.has(mmsi)) { ships.get(mmsi).marker.remove(); ships.delete(mmsi); }
+                pendingRemoval.delete(mmsi);
+                scheduleRender();
+              }, 30_000));
+            }
+          } else {
+            s.marker.setIcon(makeIcon(s));
+          }
+          scheduleRender();
+        }
+        return;
+      }
+
+      /* ── Position-bearing messages ──
+         Class A: PositionReport (AIS 1/2/3)
+         Class B: StandardClassBCSPositionReport (AIS 18)
+         Class B ext: ExtendedClassBEquipmentPositionReport (AIS 19) */
+      const prBody =
+        msg.Message?.PositionReport ||
+        msg.Message?.StandardClassBCSPositionReport ||
+        msg.Message?.ExtendedClassBEquipmentPositionReport;
+
+      if (!prBody) return;
+
+      // AISStream MetaData lat/lon are pre-parsed decimal degrees — use first
+      let lat = parseFloat(meta.latitude);
+      let lon = parseFloat(meta.longitude);
+      // Fallback to raw message fields
+      if (!isFinite(lat) || !isFinite(lon)) {
+        lat = parseFloat(prBody.Latitude ?? prBody.Lat ?? 91);
+        lon = parseFloat(prBody.Longitude ?? prBody.Lon ?? 181);
+      }
+
+      // Reject AIS "not available" sentinels (91 / 181) and null-island
+      if (!isFinite(lat) || !isFinite(lon)) return;
+      if (lat === 0 && lon === 0) return;
+      if (Math.abs(lat) >= 91 || Math.abs(lon) >= 181) return;
+
+      const cached  = staticCache.get(mmsi) || {};
+      // Only use meta.ShipType if it's non-zero (0 means AISStream hasn't resolved it)
+      const rawType = (meta.ShipType > 0) ? meta.ShipType
+                    : (prBody.ShipType > 0) ? prBody.ShipType
+                    : null;
+      const type    = (rawType !== null ? parseInt(rawType) : 0) || cached.type || 0;
+      const name    = (meta.ShipName || '').trim() || cached.name || '';
+      const sog     = parseFloat(prBody.Sog ?? prBody.SOG ?? prBody.SpeedOverGround ?? 0) || 0;
+      const cog     = parseFloat(prBody.Cog ?? prBody.COG ?? prBody.CourseOverGround ?? 0) || 0;
+      const hdg     = parseInt(prBody.TrueHeading ?? prBody.Heading ?? 511);
+      const status  = parseInt(prBody.NavigationalStatus ?? prBody.Status ?? 15);
+
+      upsertShip({
+        mmsi, lat, lon, sog, cog, hdg, status, type, name,
+        dest:     cached.dest     || '',
+        callsign: cached.callsign || '',
+        imo:      cached.imo      || 0,
+      });
+    } catch (err) {
+      console.warn('[AIS] Parse error:', err.message, e.data?.substring(0, 80));
+    }
+  };
+
+  ws.onerror = () => setStatus('error', 'WEBSOCKET ERROR');
+
+  ws.onclose = ev => {
+    const delay = Math.min(3000 * Math.pow(1.5, reconnects), 30000);
+    setStatus('error', `DISCONNECTED · RETRY ${Math.round(delay / 1000)}s`);
+    console.warn(`[AIS] Closed (${ev.code}). Retrying in ${Math.round(delay / 1000)}s`);
+    reconnects++;
+    setTimeout(connect, delay);
+  };
+}
+
+/* ── KEYBOARD ── */
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === '+' || e.key === '=') map.zoomIn();
+  if (e.key === '-' || e.key === '_') map.zoomOut();
+  if (e.key.toLowerCase() === 's')   toggleSatellite();
+  if (e.key === 'Escape')            closeDetail();
+});
+
+connect();
+</script>
+</body>
+</html>
